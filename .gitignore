@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+
+# Django
+*.log
+db.sqlite3
+db.sqlite3-journal
+/staticfiles/
+/media/
+
+# Environment
+# NOTE: .env is intentionally committed for this homework so the project
+# runs out of the box (credentials are throwaway local-dev only).
+# In a real project you would uncomment the next line instead.
+# .env
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
