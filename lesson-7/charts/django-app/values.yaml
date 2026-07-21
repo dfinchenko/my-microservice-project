@@ -1,0 +1,42 @@
+image:
+  repository: REPLACE_WITH_ECR_URL   # e.g. <acct>.dkr.ecr.us-west-2.amazonaws.com/lesson-7-ecr
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: LoadBalancer
+  port: 8000
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+autoscaling:
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+# Non-secret env vars for the ConfigMap
+config:
+  POSTGRES_HOST: db
+  POSTGRES_PORT: 5432
+  POSTGRES_USER: django_user
+  POSTGRES_DB: django_db
+  DJANGO_DEBUG: "True"
+  DJANGO_ALLOWED_HOSTS: "*"
+
+# Secret env vars for the Kubernetes Secret (Opaque)
+secrets:
+  POSTGRES_PASSWORD: pass9764gd
+  DJANGO_SECRET_KEY: django-insecure-dev-key-change-me
+
+# In-cluster PostgreSQL so the Django app has the "db" host it expects.
+# Ephemeral storage (emptyDir) — fine for a demo cluster without the EBS CSI driver.
+postgres:
+  enabled: true
+  image: postgres:14
+  port: 5432
