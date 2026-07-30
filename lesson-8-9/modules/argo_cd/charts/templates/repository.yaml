@@ -1,0 +1,22 @@
+{{- range .Values.repositories }}
+---
+# Argo CD discovers repositories from Secrets carrying this label.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: repo-{{ .name }}
+  namespace: {{ $.Values.argocdNamespace }}
+  labels:
+    argocd.argoproj.io/secret-type: repository
+type: Opaque
+stringData:
+  name: {{ .name | quote }}
+  url: {{ .url | quote }}
+  type: {{ .type | default "git" | quote }}
+  {{- if .username }}
+  username: {{ .username | quote }}
+  {{- end }}
+  {{- if .password }}
+  password: {{ .password | quote }}
+  {{- end }}
+{{- end }}
