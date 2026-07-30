@@ -3,7 +3,7 @@
 # reads the registry from `repository` and rewrites the single `tag:` line.
 image:
   repository: 481297220170.dkr.ecr.us-east-1.amazonaws.com/lesson-8-9-ecr
-  tag: "3-b3466e9"
+  tag: "5-436a101"
   pullPolicy: IfNotPresent
 
 service:
