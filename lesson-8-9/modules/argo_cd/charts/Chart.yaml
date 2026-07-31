@@ -1,6 +1,0 @@
-apiVersion: v2
-name: argocd-apps
-description: App-of-apps chart — registers Argo CD Applications and Git repositories
-type: application
-version: 0.1.0
-appVersion: "1.0.0"
