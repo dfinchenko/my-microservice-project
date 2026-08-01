@@ -1,0 +1,160 @@
+prometheus:
+  prometheusSpec:
+    retention: ${prometheus_retention}
+
+    # Without this the operator only picks up ServiceMonitors carrying the
+    # release label, and the one in the Django chart would be ignored.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+
+    resources:
+      requests:
+        cpu: 200m
+        memory: 1Gi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: ${storage_class}
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: ${prometheus_storage}
+
+# fullnameOverride keeps the service at `grafana:80`, the address the README and
+# the assignment port-forward to.
+grafana:
+  enabled: true
+  fullnameOverride: ${grafana_service_name}
+
+  adminUser: ${grafana_admin_user}
+  adminPassword: ${grafana_admin_password}
+
+  service:
+    type: ${grafana_service_type}
+    port: 80
+
+  # Dashboards come from ConfigMaps in Git, so there is nothing to persist.
+  persistence:
+    enabled: false
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 512Mi
+
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      searchNamespace: ALL
+      folderAnnotation: grafana_folder
+      provider:
+        foldersFromFilesStructure: true
+    datasources:
+      enabled: true
+      # Pinned: the dashboard JSON references the datasource by uid.
+      uid: prometheus
+
+  defaultDashboardsTimezone: browser
+
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+nodeExporter:
+  enabled: true
+
+kubeStateMetrics:
+  enabled: true
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 192Mi
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 512Mi
+
+# EKS hides the control plane: these targets would never come up.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false
+
+# Application alerts, on top of the stack's built-in rules.
+additionalPrometheusRulesMap:
+  django-app-rules:
+    groups:
+      - name: django-app
+        rules:
+          - alert: DjangoAppDown
+            expr: sum(up{namespace="${app_namespace}", job=~".*django.*"}) == 0
+            for: 3m
+            labels:
+              severity: critical
+            annotations:
+              summary: "No Django pod is being scraped"
+              description: "Prometheus sees no healthy Django target in namespace ${app_namespace} for 3 minutes."
+
+          - alert: DjangoHighErrorRate
+            expr: |
+              sum(rate(django_http_responses_total_by_status_total{status=~"5.."}[5m]))
+                /
+              clamp_min(sum(rate(django_http_responses_total_by_status_total[5m])), 0.001) > 0.05
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Django is returning 5xx for more than 5% of requests"
+              description: "5xx share over the last 5 minutes is above 5%."
+
+          - alert: DjangoHpaMaxedOut
+            expr: |
+              kube_horizontalpodautoscaler_status_current_replicas{namespace="${app_namespace}"}
+                >=
+              kube_horizontalpodautoscaler_spec_max_replicas{namespace="${app_namespace}"}
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "The HPA is pinned at maxReplicas"
+              description: "{{ $labels.horizontalpodautoscaler }} has been at its maximum for 10 minutes — raise maxReplicas or add nodes."

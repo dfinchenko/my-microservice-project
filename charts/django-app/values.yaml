@@ -1,0 +1,55 @@
+# Contract between Jenkins and Argo CD: the pipeline reads the registry from
+# `repository` and rewrites the single `tag:` line, refusing to run if it finds
+# more than one. Do not rename either key.
+image:
+  # Set once after apply: terraform output -raw ecr_repository_url
+  repository: 481297220170.dkr.ecr.us-east-1.amazonaws.com/final-project-ecr
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+service:
+  type: LoadBalancer
+  port: 8000
+
+# requests.cpu is what the HPA measures utilisation against.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+# Terraform writes the RDS endpoint and credentials into this Secret, which is
+# why none of them appear in Git.
+database:
+  existingSecret: django-db
+
+config:
+  DJANGO_DEBUG: "False"
+  DJANGO_ALLOWED_HOSTS: "*"
+
+secrets:
+  DJANGO_SECRET_KEY: django-insecure-dev-key-change-me
+
+# Fallback database for running the chart without AWS. Stores nothing durably.
+postgres:
+  enabled: false
+  image: postgres:16
+  port: 5432
+  user: django_user
+  db: django_db
+  password: django_pass
+
+metrics:
+  enabled: true
+  path: /metrics
+  serviceMonitor:
+    enabled: true
+    interval: 30s

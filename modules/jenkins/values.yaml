@@ -1,0 +1,80 @@
+controller:
+  admin:
+    username: ${admin_user}
+    password: ${admin_password}
+
+  serviceType: LoadBalancer
+  # 8080 on both sides, so `kubectl port-forward svc/jenkins 8080:8080` and the
+  # load balancer address reach the same port.
+  servicePort: 8080
+  targetPort: 8080
+
+  resources:
+    requests:
+      cpu: "${cpu_request}"
+      memory: "${memory_request}"
+    limits:
+      cpu: "${cpu_limit}"
+      memory: "${memory_limit}"
+
+  installPlugins:
+    - kubernetes:latest
+    - workflow-aggregator:latest
+    - git:latest
+    - configuration-as-code:latest
+    - credentials-binding:latest
+    - github:latest
+    - job-dsl:latest
+    - kubernetes-credentials-provider:latest
+
+  JCasC:
+    defaultConfig: true
+    configScripts:
+      django-app-ci: |
+        jobs:
+          - script: |
+              pipelineJob('django-app-ci') {
+                description('Build the Django image with Kaniko, push it to ECR, then bump image.tag in the Helm chart so Argo CD picks it up.')
+                definition {
+                  cpsScm {
+                    scm {
+                      git {
+                        remote {
+                          url('${git_repo_url}')
+              %{~ if github_credentials_id != ""}
+                          credentials('${github_credentials_id}')
+              %{~ endif}
+                        }
+                        branch('*/${git_branch}')
+                      }
+                    }
+                    scriptPath('${jenkinsfile}')
+                    lightweight(true)
+                  }
+                }
+                triggers {
+                  scm('H/2 * * * *')
+                }
+              }
+
+# Top-level key in this chart, not controller.persistence.
+persistence:
+  enabled: true
+  storageClass: "${storage_class}"
+  size: ${storage_size}
+  accessMode: ReadWriteOnce
+
+agent:
+  enabled: true
+  # Pod templates are declared in the Jenkinsfile.
+  defaultsProviderTemplate: ""
+
+serviceAccountAgent:
+  create: true
+  name: ${agent_service_account}
+  annotations:
+    eks.amazonaws.com/role-arn: ${agent_role_arn}
+
+rbac:
+  create: true
+  readSecrets: true

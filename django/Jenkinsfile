@@ -1,0 +1,214 @@
+// Build the Django image with Kaniko, push it to ECR, then bump image.tag in the
+// Helm chart and push that commit. Argo CD picks the change up from Git.
+
+pipeline {
+  agent {
+    kubernetes {
+      yaml '''
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: jenkins-agent
+spec:
+  serviceAccountName: jenkins-agent
+  containers:
+    - name: kaniko
+      image: gcr.io/kaniko-project/executor:v1.23.2-debug
+      command: ["/busybox/cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+        limits:
+          cpu: 1000m
+          memory: 1Gi
+    - name: git
+      image: alpine/git:2.45.2
+      command: ["/bin/sh", "-c", "cat"]
+      tty: true
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+'''
+    }
+  }
+
+  options {
+    timeout(time: 30, unit: 'MINUTES')
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+    disableConcurrentBuilds()
+  }
+
+  environment {
+    VALUES_FILE    = 'charts/django-app/values.yaml'
+    DOCKER_CONTEXT = 'django'
+
+    TARGET_BRANCH      = 'final-project'
+    GIT_CREDENTIALS_ID = 'github-pat'
+    SKIP_CI_MARKER     = '[skip ci]'
+  }
+
+  stages {
+
+    stage('Checkout') {
+      steps {
+        checkout scm
+
+        script {
+          def message = sh(
+            script: 'git log -1 --pretty=%B',
+            returnStdout: true
+          ).trim()
+
+          // This job pushes to the branch it polls, so skip our own commits.
+          if (message.contains(env.SKIP_CI_MARKER)) {
+            currentBuild.result = 'NOT_BUILT'
+            currentBuild.description = 'Skipped — triggered by the pipeline\'s own tag bump'
+            env.SKIP_BUILD = 'true'
+            echo "Last commit carries ${env.SKIP_CI_MARKER}; nothing to do."
+            return
+          }
+
+          env.SKIP_BUILD = 'false'
+          env.GIT_SHORT_SHA = sh(
+            script: 'git rev-parse --short=7 HEAD',
+            returnStdout: true
+          ).trim()
+
+          // Immutable tag: a moving tag would leave values.yaml unchanged and
+          // Argo CD would see nothing to sync.
+          env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_SHORT_SHA}"
+
+          env.IMAGE_REPO = sh(
+            script: "sed -n 's|^[[:space:]]*repository:[[:space:]]*\\([^ #]*\\).*|\\1|p' '${env.VALUES_FILE}' | head -1",
+            returnStdout: true
+          ).trim()
+
+          if (!env.IMAGE_REPO || env.IMAGE_REPO.startsWith('REPLACE')) {
+            error("image.repository in ${env.VALUES_FILE} is not set to the ECR URL. " +
+                  "Run: terraform output -raw ecr_repository_url")
+          }
+
+          // <account>.dkr.ecr.<region>.amazonaws.com/<repo>
+          env.ECR_REGISTRY = env.IMAGE_REPO.split('/')[0]
+          env.AWS_REGION = env.ECR_REGISTRY.split('\\.')[3]
+
+          echo """
+            Image  : ${env.IMAGE_REPO}:${env.IMAGE_TAG}
+            Region : ${env.AWS_REGION}
+            Commit : ${env.GIT_SHORT_SHA}
+          """.stripIndent()
+        }
+      }
+    }
+
+    stage('Build & push image to ECR') {
+      when { expression { env.SKIP_BUILD == 'false' } }
+      steps {
+        // The kaniko debug image ships busybox, not bash.
+        container(name: 'kaniko', shell: '/busybox/sh') {
+          sh '''#!/busybox/sh
+            set -e
+
+            # Credentials come from IRSA on the jenkins-agent ServiceAccount.
+            mkdir -p /kaniko/.docker
+            cat > /kaniko/.docker/config.json <<EOF
+            { "credHelpers": { "${ECR_REGISTRY}": "ecr-login" } }
+EOF
+
+            /kaniko/executor \
+              --context "dir://${WORKSPACE}/${DOCKER_CONTEXT}" \
+              --dockerfile "${WORKSPACE}/${DOCKER_CONTEXT}/Dockerfile" \
+              --destination "${IMAGE_REPO}:${IMAGE_TAG}" \
+              --destination "${IMAGE_REPO}:latest" \
+              --cache=false \
+              --verbosity=info
+          '''
+        }
+      }
+    }
+
+    stage('Update Helm values in Git') {
+      when { expression { env.SKIP_BUILD == 'false' } }
+      steps {
+        container('git') {
+          withCredentials([usernamePassword(
+            credentialsId: env.GIT_CREDENTIALS_ID,
+            usernameVariable: 'GIT_USER',
+            passwordVariable: 'GIT_TOKEN'
+          )]) {
+            sh '''#!/bin/sh
+              set -e
+
+              # The rewrite below assumes a single `tag:` key.
+              TAG_KEYS=$(grep -c '^[[:space:]]*tag:' "${VALUES_FILE}" || true)
+              if [ "${TAG_KEYS}" != "1" ]; then
+                echo "Expected exactly one 'tag:' key in ${VALUES_FILE}, found ${TAG_KEYS}." >&2
+                exit 1
+              fi
+
+              sed -i -E "s|^([[:space:]]*)tag:[[:space:]].*|\\1tag: \\"${IMAGE_TAG}\\"|" "${VALUES_FILE}"
+
+              grep -q "tag: \\"${IMAGE_TAG}\\"" "${VALUES_FILE}"
+              echo "--- image section after update ---"
+              sed -n '/^image:/,/^[a-z]/p' "${VALUES_FILE}"
+
+              # checkout scm runs as uid 1000 in the jnlp container, this one runs
+              # as root — without this git refuses the repo as dubious ownership.
+              git config --global --add safe.directory "${WORKSPACE}"
+
+              git config user.email "jenkins@ci.local"
+              git config user.name  "jenkins-ci"
+
+              # checkout scm leaves a detached HEAD.
+              git checkout -B "${TARGET_BRANCH}"
+
+              if git diff --quiet -- "${VALUES_FILE}"; then
+                echo "image.tag already at ${IMAGE_TAG}; nothing to commit."
+                exit 0
+              fi
+
+              # Commit before pulling: rebase refuses to run with unstaged changes.
+              git add "${VALUES_FILE}"
+              git commit -m "ci: bump django-app image.tag to ${IMAGE_TAG} ${SKIP_CI_MARKER}"
+
+              set +x
+              REPO_PATH=$(git config --get remote.origin.url \
+                | sed -E 's|^https://[^/]+/||; s|\\.git$||')
+              git remote set-url origin \
+                "https://${GIT_USER}:${GIT_TOKEN}@github.com/${REPO_PATH}.git"
+
+              git pull --rebase origin "${TARGET_BRANCH}"
+              git push origin "HEAD:${TARGET_BRANCH}"
+
+              git remote set-url origin "https://github.com/${REPO_PATH}.git"
+              echo "Pushed image.tag=${IMAGE_TAG} to ${TARGET_BRANCH}."
+            '''
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    success {
+      script {
+        if (env.SKIP_BUILD == 'false') {
+          echo """
+            Pushed ${env.IMAGE_REPO}:${env.IMAGE_TAG} and updated ${env.VALUES_FILE}.
+            Argo CD will sync on its next poll.
+          """.stripIndent()
+        }
+      }
+    }
+    failure {
+      echo 'Pipeline failed. Nothing was pushed to Git.'
+    }
+  }
+}
