@@ -4,7 +4,7 @@
 image:
   # Set once after apply: terraform output -raw ecr_repository_url
   repository: 481297220170.dkr.ecr.us-east-1.amazonaws.com/final-project-ecr
-  tag: "latest"
+  tag: "1-956e3c8"
   pullPolicy: IfNotPresent
 
 service:
